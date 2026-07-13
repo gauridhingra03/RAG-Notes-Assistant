@@ -113,7 +113,3 @@ notes_bot/
     ├── retrieve.py
     └── generate.py
 ```
-
-## Author
-
-Gauri Dhingra — B.Tech CSE (AI & ML)
