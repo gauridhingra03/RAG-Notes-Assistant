@@ -75,7 +75,7 @@ A Retrieval-Augmented Generation (RAG) app that turns a PDF into an interactive 
 ![Summary](screenshots/summary.png)
 
 ### Practice Questions
-![Practice Questions](screenshots/practice_ques.png)
+![Practice Questions](screenshots/practice_qa.png)
 
 ### Flashcards
 ![Flashcards](screenshots/flashcards.png)
