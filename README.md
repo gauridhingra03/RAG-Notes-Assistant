@@ -1,5 +1,7 @@
 # Notes RAG Assistant
 
+**Live demo:** https://rag-notes-assistant.streamlit.app/
+
 A Retrieval-Augmented Generation (RAG) app that turns a PDF into an interactive study tool — ask questions with page citations, get summaries, generate practice questions, and create flashcards, grounded in the document content.
 
 ## Features
