@@ -6,6 +6,8 @@ from src.config import EMBEDDING_MODEL_NAME
 
 def build_faiss_index(chunks: list[dict], model: SentenceTransformer):
     texts = [c["text"] for c in chunks]
+    if len(texts) == 0:
+        raise ValueError("No text could be extracted from this PDF. It might be a scanned/image-based PDF — try OCR first, or upload a text-based PDF.")
     print(f"Generating embeddings for {len(texts)} chunks...")
     # BGE models cosine similarity ke liye normalized embeddings recommend karte hain
     embeddings = model.encode(texts, show_progress_bar=True, convert_to_numpy=True, normalize_embeddings=True)

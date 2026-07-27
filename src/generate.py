@@ -3,14 +3,13 @@
 import json
 import re
 from groq import Groq, APIStatusError
-from src.config import GROQ_API_KEY, LLM_MODEL
-
-client = Groq(api_key=GROQ_API_KEY)
+from src.config import LLM_MODEL
 
 
 # ---------- Shared helpers ----------
-def _call_llm(prompt: str, temperature: float = 0.3, max_tokens: int = 2048) -> tuple[str, str]:
-    """Returns (content, finish_reason). 'length' = truncated, 'error' = rate-limit/too-large."""
+def _call_llm(prompt: str, api_key: str, temperature: float = 0.3, max_tokens: int = 2048) -> tuple[str, str]:
+    """Returns (content, finish_reason). 'rate_limit' = 429, 'too_large' = 413."""
+    client = Groq(api_key=api_key)
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
@@ -20,8 +19,10 @@ def _call_llm(prompt: str, temperature: float = 0.3, max_tokens: int = 2048) -> 
         )
         return response.choices[0].message.content, response.choices[0].finish_reason
     except APIStatusError as e:
-        if e.status_code in (413, 429):
-            return "", "error"
+        if e.status_code == 429:
+            return "", "rate_limit"
+        if e.status_code == 413:
+            return "", "too_large"
         raise
 
 
@@ -53,12 +54,13 @@ def _is_similar(text_a: str, text_b: str, threshold: float = 0.6) -> bool:
     return overlap >= threshold
 
 
-def _generate_batched_items(context: str, prompt_fn, key_field: str, target_count: int,
+def _generate_batched_items(context: str, prompt_fn, key_field: str, target_count: int, api_key: str,
                              max_rounds: int = 4, temperature: float = 0.7) -> list[dict]:
     """Tries to get everything in ONE call first (fast path). Makes additional
     calls for any shortfall. If still short by the final try, allows near-duplicates
     so the requested count is always met."""
     collected = []
+    hit_rate_limit = False
 
     for round_num in range(max_rounds):
         if len(collected) >= target_count:
@@ -67,10 +69,12 @@ def _generate_batched_items(context: str, prompt_fn, key_field: str, target_coun
         recent = [item[key_field] for item in collected[-6:]]
         prompt = prompt_fn(context, remaining, recent)
 
-        raw, finish_reason = _call_llm(prompt, temperature=temperature, max_tokens=2000)
+        raw, finish_reason = _call_llm(prompt, api_key, temperature=temperature, max_tokens=2000)
         is_last_round = (round_num == max_rounds - 1)
 
-        if finish_reason == "error":
+        if finish_reason in ("rate_limit", "too_large"):
+            if finish_reason == "rate_limit":
+                hit_rate_limit = True
             continue
         try:
             batch = _extract_json(raw)
@@ -83,14 +87,16 @@ def _generate_batched_items(context: str, prompt_fn, key_field: str, target_coun
                 if len(collected) >= target_count:
                     break
 
-    # Safety net: agar 3 rounds ke baad bhi shortfall hai (jaise koi call rate-limit/parsing
-    # error se fail hui thi), ek aakhri extra call karo — dedup skip taaki count guaranteed mile
+    # Safety net: agar rounds ke baad bhi shortfall hai, ek aakhri extra call karo —
+    # dedup skip taaki count guaranteed mile
     if len(collected) < target_count:
         remaining = target_count - len(collected)
         recent = [item[key_field] for item in collected[-6:]]
         prompt = prompt_fn(context, remaining, recent)
-        raw, finish_reason = _call_llm(prompt, temperature=temperature, max_tokens=2000)
-        if finish_reason != "error":
+        raw, finish_reason = _call_llm(prompt, api_key, temperature=temperature, max_tokens=2000)
+        if finish_reason == "rate_limit":
+            hit_rate_limit = True
+        elif finish_reason != "too_large":
             try:
                 batch = _extract_json(raw)
                 for item in batch:
@@ -100,7 +106,7 @@ def _generate_batched_items(context: str, prompt_fn, key_field: str, target_coun
             except Exception:
                 pass
 
-    return collected[:target_count]
+    return collected[:target_count], hit_rate_limit
 
 
 def group_chunks_by_pages(chunks: list[dict], pages_per_section: int = 20) -> list[dict]:
@@ -140,16 +146,18 @@ Question: {query}
 Answer:"""
 
 
-def generate_answer(query: str, chunks: list[dict]) -> str:
+def generate_answer(query: str, chunks: list[dict], api_key: str) -> str:
     prompt = build_qa_prompt(query, chunks)
-    text, finish_reason = _call_llm(prompt, temperature=0.2, max_tokens=3000)
-    if finish_reason == "error":
-        return "⚠️ The request was too large or the rate limit was hit. Try asking a shorter/simpler question."
+    text, finish_reason = _call_llm(prompt, api_key, temperature=0.2, max_tokens=3000)
+    if finish_reason == "rate_limit":
+        return "⏳ Rate limit reached. Please wait 30-60 seconds and try again — or add your own API key in the sidebar."
+    if finish_reason == "too_large":
+        return "⚠️ The request was too large. Try asking a shorter/simpler question."
     return text
 
 
 # ---------- Feature 2: Summarize ----------
-def generate_summary(chunks: list[dict], length: str = "medium") -> str:
+def generate_summary(chunks: list[dict], api_key: str, length: str = "medium") -> str:
     context = _limit_context(chunks)
     length_map = {
         "short": "in about 100 words",
@@ -166,14 +174,16 @@ Document content:
 {context}
 
 Summary:"""
-    text, finish_reason = _call_llm(prompt, temperature=0.3, max_tokens=3000)
-    if finish_reason == "error":
-        return "⚠️ The request was too large or the rate limit was hit. Try a shorter summary length."
+    text, finish_reason = _call_llm(prompt, api_key, temperature=0.3, max_tokens=3000)
+    if finish_reason == "rate_limit":
+        return "⏳ Rate limit reached. Please wait 30-60 seconds and try again — or add your own API key in the sidebar."
+    if finish_reason == "too_large":
+        return "⚠️ The request was too large. Try a shorter summary length."
     return text
 
 
 # ---------- Feature 3: Practice Questions ----------
-def generate_practice_questions(chunks: list[dict], num_questions: int = 5, seed_note: str = "") -> list[dict]:
+def generate_practice_questions(chunks: list[dict], api_key: str, num_questions: int = 5, seed_note: str = "") -> list[dict]:
     context = _limit_context(chunks)
 
     def prompt_fn(ctx, n, recent):
@@ -192,15 +202,17 @@ Document content:
 {ctx}
 """
 
-    items = _generate_batched_items(context, prompt_fn, key_field="question",
-                                     target_count=num_questions, temperature=0.7)
+    items, hit_rate_limit = _generate_batched_items(context, prompt_fn, key_field="question",
+                                                      target_count=num_questions, api_key=api_key, temperature=0.7)
     if not items:
+        if hit_rate_limit:
+            return [{"question": "Rate limit reached", "answer": "⏳ Please wait 30-60 seconds and try again — or add your own API key in the sidebar."}]
         return [{"question": "Error parsing questions", "answer": "LLM request kept failing — try again or use a smaller section."}]
     return items
 
 
 # ---------- Feature 4: Flashcards ----------
-def generate_flashcards(chunks: list[dict], num_cards: int = 8, seed_note: str = "") -> list[dict]:
+def generate_flashcards(chunks: list[dict], api_key: str, num_cards: int = 8, seed_note: str = "") -> list[dict]:
     context = _limit_context(chunks)
 
     def prompt_fn(ctx, n, recent):
@@ -218,8 +230,10 @@ Document content:
 {ctx}
 """
 
-    items = _generate_batched_items(context, prompt_fn, key_field="term",
-                                     target_count=num_cards, temperature=0.6)
+    items, hit_rate_limit = _generate_batched_items(context, prompt_fn, key_field="term",
+                                                      target_count=num_cards, api_key=api_key, temperature=0.6)
     if not items:
+        if hit_rate_limit:
+            return [{"term": "Rate limit reached", "definition": "⏳ Please wait 30-60 seconds and try again — or add your own API key in the sidebar."}]
         return [{"term": "Error parsing flashcards", "definition": "LLM request kept failing — try again or use a smaller section."}]
     return items
