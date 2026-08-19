@@ -28,12 +28,22 @@ def _call_llm(prompt: str, api_key: str, temperature: float = 0.3, max_tokens: i
 def _limit_context(chunks: list[dict], max_chars: int = 9000) -> str:
     if not chunks:
         return ""
-    budget_per_chunk = max_chars // len(chunks)
-    context = ""
-    for c in chunks:
-        context += c["text"][:budget_per_chunk] + "\n\n"
-    return context.strip()
+    avg_len = sum(len(c["text"]) for c in chunks) / len(chunks)
+    max_chunks = max(1, int(max_chars // avg_len))
 
+    if max_chunks >= len(chunks):
+        selected = chunks
+    else:
+        step = len(chunks) / max_chunks
+        indices = [int(i * step) for i in range(max_chunks)]
+        selected = [chunks[i] for i in indices]
+
+    context = ""
+    for c in selected:
+        if len(context) + len(c["text"]) > max_chars:
+            break
+        context += c["text"] + "\n\n"
+    return context.strip()
 
 def _extract_json(text: str):
     match = re.search(r"\[.*\]", text, re.DOTALL)
