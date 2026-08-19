@@ -1,12 +1,11 @@
 # src/generate.py
-
 import json
 import re
 from groq import Groq, APIStatusError
 from src.config import LLM_MODEL
 
-
 # ---------- Shared helpers ----------
+
 def _call_llm(prompt: str, api_key: str, temperature: float = 0.3, max_tokens: int = 2048) -> tuple[str, str]:
     """Returns (content, finish_reason). 'rate_limit' = 429, 'too_large' = 413."""
     client = Groq(api_key=api_key)
@@ -27,11 +26,12 @@ def _call_llm(prompt: str, api_key: str, temperature: float = 0.3, max_tokens: i
 
 
 def _limit_context(chunks: list[dict], max_chars: int = 9000) -> str:
+    if not chunks:
+        return ""
+    budget_per_chunk = max_chars // len(chunks)
     context = ""
     for c in chunks:
-        if len(context) + len(c["text"]) > max_chars:
-            break
-        context += c["text"] + "\n\n"
+        context += c["text"][:budget_per_chunk] + "\n\n"
     return context.strip()
 
 
@@ -68,7 +68,6 @@ def _generate_batched_items(context: str, prompt_fn, key_field: str, target_coun
         remaining = target_count - len(collected)
         recent = [item[key_field] for item in collected[-6:]]
         prompt = prompt_fn(context, remaining, recent)
-
         raw, finish_reason = _call_llm(prompt, api_key, temperature=temperature, max_tokens=2000)
         is_last_round = (round_num == max_rounds - 1)
 
@@ -76,6 +75,7 @@ def _generate_batched_items(context: str, prompt_fn, key_field: str, target_coun
             if finish_reason == "rate_limit":
                 hit_rate_limit = True
             continue
+
         try:
             batch = _extract_json(raw)
         except Exception:
@@ -84,8 +84,8 @@ def _generate_batched_items(context: str, prompt_fn, key_field: str, target_coun
         for item in batch:
             if is_last_round or not any(_is_similar(item[key_field], existing[key_field]) for existing in collected):
                 collected.append(item)
-                if len(collected) >= target_count:
-                    break
+            if len(collected) >= target_count:
+                break
 
     # Safety net: agar rounds ke baad bhi shortfall hai, ek aakhri extra call karo —
     # dedup skip taaki count guaranteed mile
@@ -114,7 +114,6 @@ def group_chunks_by_pages(chunks: list[dict], pages_per_section: int = 20) -> li
     Last section ka end actual last page pe cap hota hai (e.g. Pages 21-36, not 21-40)."""
     if not chunks:
         return []
-
     max_page = max(c.get("page", 1) for c in chunks)
     sections = {}
     for chunk in chunks:
@@ -131,11 +130,15 @@ def group_chunks_by_pages(chunks: list[dict], pages_per_section: int = 20) -> li
 
 
 # ---------- Feature 1: Q&A ----------
+
 def build_qa_prompt(query: str, chunks: list[dict]) -> str:
     context = "\n\n".join([f"[Source {i+1}, Page {c.get('page', '?')}]: {c['text']}" for i, c in enumerate(chunks)])
     return f"""You are a study assistant. Answer the question using only the context below.
+
 Give a complete, detailed explanation — synthesize information across all sources into ONE coherent answer, don't describe each source separately.
+
 IMPORTANT: You MUST end your answer with the page number(s) the information came from, in the format "(Page 2)" or "(Pages 2, 5)" — this is required even if all the information comes from a single page. Never mention "Source" numbers.
+
 If the answer is not in the context, say "This information is not available in the notes" — do not make up information.
 
 Context:
@@ -157,6 +160,7 @@ def generate_answer(query: str, chunks: list[dict], api_key: str) -> str:
 
 
 # ---------- Feature 2: Summarize ----------
+
 def generate_summary(chunks: list[dict], api_key: str, length: str = "medium") -> str:
     context = _limit_context(chunks)
     length_map = {
@@ -165,10 +169,16 @@ def generate_summary(chunks: list[dict], api_key: str, length: str = "medium") -
         "detailed": "in about 500 words, covering all major sections"
     }
     prompt = f"""You are a study assistant. Summarize the following document content {length_map.get(length, 'in about 250 words')}.
+
+Ensure balanced coverage across ALL major sections and sub-topics present in the content — do not concentrate only on 2-3 areas while skipping others, even briefly.
+
 Focus on the key ideas, main arguments, and important technical details.
+
 Mention each point only ONCE — if you use headers/sections, make sure no idea, term, or detail is repeated across multiple sections or in a "key ideas" recap at the end.
+
 If the document contains mathematical formulas or equations, preserve them exactly as written (do not paraphrase or drop them) and include them at the relevant point in the summary.
-Stay close to the requested word count. Do not add information not present in the text.
+
+Stay close to the requested word count. Only use information present in the document content above — do not add outside knowledge.
 
 Document content:
 {context}
@@ -183,6 +193,7 @@ Summary:"""
 
 
 # ---------- Feature 3: Practice Questions ----------
+
 def generate_practice_questions(chunks: list[dict], api_key: str, num_questions: int = 5, seed_note: str = "") -> list[dict]:
     context = _limit_context(chunks)
 
@@ -190,8 +201,11 @@ def generate_practice_questions(chunks: list[dict], api_key: str, num_questions:
         avoid = f"Avoid repeating these topics: {'; '.join(recent)}." if recent else ""
         seed_line = f"({seed_note})" if seed_note else ""
         return f"""You are a study assistant. Based on the following document content, generate {n} practice questions with answers.
-Mix conceptual ("why/how") and factual ("what is") questions. Cover DIFFERENT concepts — don't ask about the same idea twice in different words.
+
+Mix conceptual ("why/how") and factual ("what is") questions. Ensure questions are spread across ALL distinct sections/topics in the content, not clustered around 1-2 areas. Cover DIFFERENT concepts — don't ask about the same idea twice in different words.
+
 Each answer must be a complete, self-contained explanation (2-3 full sentences, ~40-60 words) — detailed enough to actually teach the concept, not just a one-liner.
+
 {avoid}
 {seed_line}
 
@@ -212,6 +226,7 @@ Document content:
 
 
 # ---------- Feature 4: Flashcards ----------
+
 def generate_flashcards(chunks: list[dict], api_key: str, num_cards: int = 8, seed_note: str = "") -> list[dict]:
     context = _limit_context(chunks)
 
@@ -219,7 +234,11 @@ def generate_flashcards(chunks: list[dict], api_key: str, num_cards: int = 8, se
         avoid = f"Avoid repeating these terms: {'; '.join(recent)}." if recent else ""
         seed_line = f"({seed_note})" if seed_note else ""
         return f"""You are a study assistant. Based on the following document content, generate {n} flashcards covering important terms and concepts.
-Each definition must be SPECIFIC to how the term is used in THIS document (mention concrete details, not a generic textbook definition), and substantial enough to be useful — 1-2 full sentences, ~25-40 words. Never a one-word or overly short answer.
+
+Ensure terms are drawn from ALL distinct sections/topics in the content, not clustered around 1-2 areas.
+
+Each definition must be SPECIFIC to how the term is used in THIS document (mention concrete details, not a generic textbook definition), and substantial enough to be useful — 1-2 full sentences, ~25-40 words. Never a one-word or overly short answer. Only use information present in the document content above.
+
 {avoid}
 {seed_line}
 
