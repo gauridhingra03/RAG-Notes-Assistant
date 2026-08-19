@@ -17,7 +17,7 @@ def _get_secret(key: str) -> str:
         return None
 
 DEFAULT_GROQ_API_KEY = _get_secret("GROQ_API_KEY")
-LLM_MODEL = "llama-3.1-8b-instant"
+LLM_MODEL = "openai/gpt-oss-20b"
 
 if not DEFAULT_GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY missing! Create your free key from https://console.groq.com")
